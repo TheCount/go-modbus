@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+
+	"github.com/TheCount/go-multilocker/multilocker"
 )
 
 // allDataFunctions is the list of all function codes which affect the
@@ -290,14 +292,242 @@ func (d *Data) AddToServer(
 	return srv.SetFunctionHandler(d.FunctionHandler, unit, functions...)
 }
 
+// getMutexen returns all mutexes necessary for the specified list of
+// references.
+func (*Data) getMutexen(refs []dataRef) []*sync.RWMutex {
+	blocks := make(map[*dataBlock]struct{})
+	result := make([]*sync.RWMutex, 0, len(refs))
+	for _, ref := range refs {
+		if _, ok := blocks[ref.block]; !ok {
+			blocks[ref.block] = struct{}{}
+			result = append(result, &ref.block.mx)
+		}
+	}
+	return result
+}
+
+// getNeededRefs returns a list of needed references for the specified range
+// in the specified data type.
+func (d *Data) getNeededRefs(dt DataType, start, count int) ([]dataRef, error) {
+	result := d.refs[dt]
+	// strip start
+	for {
+		if len(result) == 0 {
+			return nil, ExceptionIllegalDataAddress
+		}
+		if result[0].startBit+result[0].numBits > start {
+			break
+		}
+		result = result[1:]
+	}
+	// strip end
+	for {
+		lastidx := len(result) - 1
+		if result[lastidx].startBit < start+count {
+			break
+		}
+		if lastidx == 0 {
+			return nil, ExceptionIllegalDataAddress
+		}
+		result = result[:lastidx]
+	}
+	// Make sure there are no gaps
+	for i := 0; i < len(result)-1; i++ {
+		if result[i].startBit+result[i].numBits != result[i+1].startBit {
+			return nil, ExceptionIllegalDataAddress
+		}
+	}
+	return result, nil
+}
+
+// getReadLocker returns a read locker for the specified list of data
+// references. The returned locker atomically locks all specified references.
+func (d *Data) getReadLocker(refs []dataRef) sync.Locker {
+	mxs := d.getMutexen(refs)
+	lockers := make([]sync.Locker, len(mxs))
+	for i := range lockers {
+		lockers[i] = mxs[i].RLocker()
+	}
+	return multilocker.New(lockers...)
+}
+
+// getWriteLocker returns a write locker for the specified list of data
+// references. The returned locker atomically locks all specified references.
+func (d *Data) getWriteLocker(refs []dataRef) sync.Locker {
+	mxs := d.getMutexen(refs)
+	lockers := make([]sync.Locker, len(mxs))
+	for i := range lockers {
+		lockers[i] = mxs[i]
+	}
+	return multilocker.New(lockers...)
+}
+
+// readData reads n data items for the specified data type from the specified
+// address and appends them to dst.
+func (d *Data) readData(
+	dst []byte, dt DataType, addr uint16, n int,
+) ([]byte, error) {
+	startBit := numBits[dt] * int(addr)
+	count := numBits[dt] * n
+	refs, err := d.getNeededRefs(dt, startBit, count)
+	if err != nil {
+		return nil, err
+	}
+	ml := d.getReadLocker(refs)
+	ml.Lock()
+	defer ml.Unlock()
+	// copy bit by bit
+	// FIXME: We could make this faster in many common special cases
+	spill := 0
+	var current *byte
+	for _, ref := range refs {
+		for startBit < ref.startBit+ref.numBits && count > 0 {
+			if spill == 0 {
+				dst = append(dst, 0)
+				current = &dst[len(dst)-1]
+				spill = 8
+			}
+			blockBit := ref.blockOffset - ref.startBit + startBit
+			blockByte, blockOffset := blockBit/8, blockBit%8
+			*current |=
+				((ref.block.data[blockByte] >> blockOffset) & 1) << (8 - spill)
+			startBit++
+			count--
+			spill--
+		}
+	}
+	return dst, nil
+}
+
+// writeData writes n data itens for the specified data type to the specified
+// address from src.
+func (d *Data) writeData(dt DataType, addr uint16, n int, src []byte) error {
+	startBit := numBits[dt] * int(addr)
+	count := numBits[dt] * n
+	refs, err := d.getNeededRefs(dt, startBit, count)
+	if err != nil {
+		return err
+	}
+	ml := d.getWriteLocker(refs)
+	ml.Lock()
+	defer ml.Unlock()
+	// copy bit by bit
+	// FIXME: We could make this faster in many common special cases
+	srcBit := 0
+	for _, ref := range refs {
+		for startBit < ref.startBit+ref.numBits && count > 0 {
+			if srcBit == 8 {
+				src = src[1:]
+				srcBit = 0
+			}
+			blockBit := ref.blockOffset - ref.startBit + startBit
+			blockByte, blockOffset := blockBit/8, blockBit%8
+			ref.block.data[blockByte] &^= 1 << blockOffset
+			ref.block.data[blockByte] |= ((src[0] >> srcBit) & 1) << blockOffset
+			startBit++
+			count--
+			srcBit++
+		}
+	}
+	return nil
+}
+
+// maskData performs a Modbus mask data operation on a single word.
+func (d *Data) maskData(dt DataType, addr, and, or uint16) error {
+	startBit := 16 * int(addr)
+	refs, err := d.getNeededRefs(dt, startBit, 16)
+	if err != nil {
+		return err
+	}
+	if len(refs) != 1 {
+		// FIXME: overlapping data blocks not supported for this operation
+		return ExceptionIllegalDataAddress
+	}
+	ref := refs[0]
+	ref.block.mx.Lock()
+	defer ref.block.mx.Unlock()
+	blockByte := (ref.blockOffset - ref.startBit + startBit) / 8
+	data := ref.block.data[blockByte : blockByte+2]
+	word := binary.BigEndian.Uint16(data)
+	word = (word & and) | (or &^ and)
+	binary.BigEndian.PutUint16(data, word)
+	return nil
+}
+
+// writeReadData atomically writes the specified values and reads n data items,
+// appending them to dest.
+func (d *Data) writeReadData(
+	dst []byte, dt DataType,
+	writeAddr uint16, src []byte, readAddr uint16, n int,
+) ([]byte, error) {
+	writeStartBit := 16 * int(writeAddr)
+	writeCount := 8 * len(src)
+	readStartBit := 16 * int(readAddr)
+	readCount := 16 * n
+	writeRefs, err := d.getNeededRefs(dt, writeStartBit, writeCount)
+	if err != nil {
+		return nil, err
+	}
+	readRefs, err := d.getNeededRefs(dt, readStartBit, readCount)
+	if err != nil {
+		return nil, err
+	}
+	combinedRefs := make([]dataRef, len(writeRefs)+len(readRefs))
+	copy(combinedRefs, writeRefs)
+	copy(combinedRefs[len(writeRefs):], readRefs)
+	ml := d.getWriteLocker(combinedRefs)
+	ml.Lock()
+	defer ml.Unlock()
+	// copy bit by bit
+	// FIXME: We could make this faster in many common special cases
+	srcBit := 0
+	for _, ref := range writeRefs {
+		for writeStartBit < ref.startBit+ref.numBits && writeCount > 0 {
+			if srcBit == 8 {
+				src = src[1:]
+				srcBit = 0
+			}
+			blockBit := ref.blockOffset - ref.startBit + writeStartBit
+			blockByte, blockOffset := blockBit/8, blockBit%8
+			ref.block.data[blockByte] &^= 1 << blockOffset
+			ref.block.data[blockByte] |= ((src[0] >> srcBit) & 1) << blockOffset
+			writeStartBit++
+			writeCount--
+			srcBit++
+		}
+	}
+	// copy bit by bit
+	// FIXME: We could make this faster in many common special cases
+	spill := 0
+	var current *byte
+	for _, ref := range readRefs {
+		for readStartBit < ref.startBit+ref.numBits && readCount > 0 {
+			if spill == 0 {
+				dst = append(dst, 0)
+				current = &dst[len(dst)-1]
+				spill = 8
+			}
+			blockBit := ref.blockOffset - ref.startBit + readStartBit
+			blockByte, blockOffset := blockBit/8, blockBit%8
+			*current |=
+				((ref.block.data[blockByte] >> blockOffset) & 1) << (8 - spill)
+			readStartBit++
+			readCount--
+			spill--
+		}
+	}
+	return dst, nil
+}
+
 // FunctionHandler is the Modbus function handler for the specified data.
 func (d *Data) FunctionHandler(
 	ctx context.Context, request Message, srv *Server,
 ) ([]byte, error) {
+	var p Parser
 	adu := request.ADU()
 	switch adu.Function() {
 	case FunctionReadCoils:
-		addr, n, err := ParseReadCoils(adu.Data())
+		addr, n, err := p.ParseReadCoils(adu.Data())
 		if err != nil {
 			return nil, err
 		}
@@ -305,7 +535,7 @@ func (d *Data) FunctionHandler(
 		response[0] = byte((n + 7) / 8)
 		return d.readData(response, DataTypeCoils, addr, n)
 	case FunctionReadDiscreteInputs:
-		addr, n, err := ParseReadDiscreteInputs(adu.Data())
+		addr, n, err := p.ParseReadDiscreteInputs(adu.Data())
 		if err != nil {
 			return nil, err
 		}
@@ -316,7 +546,7 @@ func (d *Data) FunctionHandler(
 		}
 		return d.readData(response, DataTypeDiscreteInputs, addr, n)
 	case FunctionReadHoldingRegisters:
-		addr, n, err := ParseReadHoldingRegisters(adu.Data())
+		addr, n, err := p.ParseReadHoldingRegisters(adu.Data())
 		if err != nil {
 			return nil, err
 		}
@@ -324,7 +554,7 @@ func (d *Data) FunctionHandler(
 		response[0] = byte(2 * n)
 		return d.readData(response, DataTypeHoldingRegisters, addr, n)
 	case FunctionReadInputRegisters:
-		addr, n, err := ParseReadInputRegisters(adu.Data())
+		addr, n, err := p.ParseReadInputRegisters(adu.Data())
 		if err != nil {
 			return nil, err
 		}
@@ -332,7 +562,7 @@ func (d *Data) FunctionHandler(
 		response[0] = byte(2 * n)
 		return d.readData(response, DataTypeInputRegisters, addr, n)
 	case FunctionWriteSingleCoil:
-		addr, v, err := ParseWriteSingleCoil(adu.Data())
+		addr, v, err := p.ParseWriteSingleCoil(adu.Data())
 		if err != nil {
 			return nil, err
 		}
@@ -340,65 +570,63 @@ func (d *Data) FunctionHandler(
 		if v {
 			wData[0] = 1
 		}
-		if err := d.writeData(DataTypeCoils, addr, wData); err != nil {
+		if err := d.writeData(DataTypeCoils, addr, 1, wData); err != nil {
 			return nil, err
 		}
 		return adu.Data(), nil
 	case FunctionWriteSingleRegister:
-		addr, v, err := ParseWriteSingleRegister(adu.Data())
+		addr, v, err := p.ParseWriteSingleRegister(adu.Data())
 		if err != nil {
 			return nil, err
 		}
 		wData := make([]byte, 2)
 		binary.BigEndian.PutUint16(wData, uint16(v))
 		if err := d.writeData(
-			DataTypeHoldingRegisters, addr, wData,
+			DataTypeHoldingRegisters, addr, 1, wData,
 		); err != nil {
 			return nil, err
 		}
 		return adu.Data(), nil
 	case FunctionWriteMultipleCoils:
-		addr, n, v, err := ParseWriteMultipleCoils(adu.Data())
+		addr, n, v, err := p.ParseWriteMultipleCoils(adu.Data())
 		if err != nil {
 			return nil, err
 		}
-		if err := d.writeData(DataTypeCoils, addr, v); err != nil {
+		if err := d.writeData(DataTypeCoils, addr, n, v); err != nil {
 			return nil, err
 		}
 		return adu.Data()[:4], nil
 	case FunctionWriteMultipleRegisters:
-		addr, n, v, err := ParseWriteMultipleRegisters(adu.Data())
+		addr, v, err := p.ParseWriteMultipleRegisters(adu.Data())
 		if err != nil {
 			return nil, err
 		}
-		if err := d.writeData(DataTypeHoldingRegisters, addr, v); err != nil {
+		if err := d.writeData(
+			DataTypeHoldingRegisters, addr, len(v), v,
+		); err != nil {
 			return nil, err
 		}
 		return adu.Data()[:4], nil
 	case FunctionMaskWriteRegister:
-		addr, and, or, err := ParseMaskWriteRegister(adu.Data())
+		addr, and, or, err := p.ParseMaskWriteRegister(adu.Data())
 		if err != nil {
 			return nil, err
 		}
 		if err := d.maskData(
-			DataTypeTypeHoldingRegisters, addr, and, or,
+			DataTypeHoldingRegisters, addr, and, or,
 		); err != nil {
 			return nil, err
 		}
 		return adu.Data(), nil
 	case FunctionReadWriteMultipleRegisters:
-		raddr, nr, waddr, v, err := ParseReadWriteMultipleRegisters(adu.Data())
+		raddr, nr, waddr, v, err := p.ParseReadWriteMultipleRegisters(adu.Data())
 		if err != nil {
 			return nil, err
 		}
 		response := make([]byte, 1, 2*nr+1)
 		response[0] = byte(2 * nr)
-		if err := d.writeReadData(
-			response, DataTypeHoldingRegisters, waddr, v, raddr, nr,
-		); err != nil {
-			return nil, err
-		}
-		return response, nil
+		return d.writeReadData(response, DataTypeHoldingRegisters,
+			waddr, v, raddr, nr)
 	default:
 		return nil, ExceptionIllegalFunction
 	}
