@@ -38,6 +38,12 @@ const (
 	numDataTypes = 4
 )
 
+// IsReadOnly returns true if and only if this data type is read-only for the
+// Modbus client (i. e., discrete inputs or input registers).
+func (dt DataType) IsReadOnly() bool {
+	return dt == DataTypeDiscreteInputs || dt == DataTypeInputRegisters
+}
+
 // dataTypeNames are the names of the data types.
 var dataTypeNames = [numDataTypes]string{
 	"Discrete Inputs",
