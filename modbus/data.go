@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"sync"
 
@@ -636,4 +637,189 @@ func (d *Data) FunctionHandler(
 	default:
 		return nil, ExceptionIllegalFunction
 	}
+}
+
+// SetInt16 is a convenience function which sets the register specified by
+// dt and addr to the specified 2's complement signed 16-bit integer value.
+func (d *Data) SetInt16(dt DataType, addr uint16, value int16) error {
+	var buf [2]byte
+	buf[0] = byte(uint16(value) >> 8)
+	buf[1] = byte(uint16(value) >> 0)
+	return d.writeData(dt, addr, 16/numBits[dt], buf[:])
+}
+
+// SetUint16 is a convenience function which sets the register specified by
+// dt and addr to the specified unsigned 16-bit integer value.
+func (d *Data) SetUint16(dt DataType, addr uint16, value uint16) error {
+	var buf [2]byte
+	buf[0] = byte(value >> 8)
+	buf[1] = byte(value >> 0)
+	return d.writeData(dt, addr, 16/numBits[dt], buf[:])
+}
+
+// SetInt32BE is a convenience function which sets the registers specified by
+// dt and addr to the specified 2's complement signed 32-bit integer value
+// in big endian order.
+func (d *Data) SetInt32BE(dt DataType, addr uint16, value int32) error {
+	var buf [4]byte
+	buf[0] = byte(uint32(value) >> 24)
+	buf[1] = byte(uint32(value) >> 16)
+	buf[2] = byte(uint32(value) >> 8)
+	buf[3] = byte(uint32(value) >> 0)
+	return d.writeData(dt, addr, 32/numBits[dt], buf[:])
+}
+
+// SetInt32LE is a convenience function which sets the registers specified by
+// dt and addr to the specified 2's complement signed 32-bit integer value
+// in little endian order.
+func (d *Data) SetInt32LE(dt DataType, addr uint16, value int32) error {
+	var buf [4]byte
+	buf[2] = byte(uint32(value) >> 24)
+	buf[3] = byte(uint32(value) >> 16)
+	buf[0] = byte(uint32(value) >> 8)
+	buf[1] = byte(uint32(value) >> 0)
+	return d.writeData(dt, addr, 32/numBits[dt], buf[:])
+}
+
+// SetUint32BE is a convenience function which sets the registers specified by
+// dt and addr to the specified unsigned 32-bit integer value
+// in big endian order.
+func (d *Data) SetUint32BE(dt DataType, addr uint16, value uint32) error {
+	var buf [4]byte
+	buf[0] = byte(value >> 24)
+	buf[1] = byte(value >> 16)
+	buf[2] = byte(value >> 8)
+	buf[3] = byte(value >> 0)
+	return d.writeData(dt, addr, 32/numBits[dt], buf[:])
+}
+
+// SetUint32LE is a convenience function which sets the registers specified by
+// dt and addr to the specified unsigned 32-bit integer value
+// in little endian order.
+func (d *Data) SetUint32LE(dt DataType, addr uint16, value uint32) error {
+	var buf [4]byte
+	buf[2] = byte(value >> 24)
+	buf[3] = byte(value >> 16)
+	buf[0] = byte(value >> 8)
+	buf[1] = byte(value >> 0)
+	return d.writeData(dt, addr, 32/numBits[dt], buf[:])
+}
+
+// SetInt64BE is a convenience function which sets the registers specified by
+// dt and addr to the specified 2's complement signed 64-bit integer value
+// in big endian order.
+func (d *Data) SetInt64BE(dt DataType, addr uint16, value int64) error {
+	var buf [8]byte
+	buf[0] = byte(uint64(value) >> 56)
+	buf[1] = byte(uint64(value) >> 48)
+	buf[2] = byte(uint64(value) >> 40)
+	buf[3] = byte(uint64(value) >> 32)
+	buf[4] = byte(uint64(value) >> 24)
+	buf[5] = byte(uint64(value) >> 16)
+	buf[6] = byte(uint64(value) >> 8)
+	buf[7] = byte(uint64(value) >> 0)
+	return d.writeData(dt, addr, 64/numBits[dt], buf[:])
+}
+
+// SetInt64LE is a convenience function which sets the registers specified by
+// dt and addr to the specified 2's complement signed 64-bit integer value
+// in little endian order.
+func (d *Data) SetInt64LE(dt DataType, addr uint16, value int64) error {
+	var buf [8]byte
+	buf[6] = byte(uint64(value) >> 56)
+	buf[7] = byte(uint64(value) >> 48)
+	buf[4] = byte(uint64(value) >> 40)
+	buf[5] = byte(uint64(value) >> 32)
+	buf[2] = byte(uint64(value) >> 24)
+	buf[3] = byte(uint64(value) >> 16)
+	buf[0] = byte(uint64(value) >> 8)
+	buf[1] = byte(uint64(value) >> 0)
+	return d.writeData(dt, addr, 64/numBits[dt], buf[:])
+}
+
+// SetUint64BE is a convenience function which sets the registers specified by
+// dt and addr to the specified unsigned 64-bit integer value
+// in big endian order.
+func (d *Data) SetUint64BE(dt DataType, addr uint16, value uint64) error {
+	var buf [8]byte
+	buf[0] = byte(value >> 56)
+	buf[1] = byte(value >> 48)
+	buf[2] = byte(value >> 40)
+	buf[3] = byte(value >> 32)
+	buf[4] = byte(value >> 24)
+	buf[5] = byte(value >> 16)
+	buf[6] = byte(value >> 8)
+	buf[7] = byte(value >> 0)
+	return d.writeData(dt, addr, 64/numBits[dt], buf[:])
+}
+
+// SetUint64LE is a convenience function which sets the registers specified by
+// dt and addr to the specified unsigned 64-bit integer value
+// in little endian order.
+func (d *Data) SetUint64LE(dt DataType, addr uint16, value uint64) error {
+	var buf [8]byte
+	buf[6] = byte(value >> 56)
+	buf[7] = byte(value >> 48)
+	buf[4] = byte(value >> 40)
+	buf[5] = byte(value >> 32)
+	buf[2] = byte(value >> 24)
+	buf[3] = byte(value >> 16)
+	buf[0] = byte(value >> 8)
+	buf[1] = byte(value >> 0)
+	return d.writeData(dt, addr, 64/numBits[dt], buf[:])
+}
+
+// SetFloat32BE is a convenience function which sets the registers specified by
+// dt and addr to the specified single-precision floating point value
+// in big endian order.
+func (d *Data) SetFloat32BE(dt DataType, addr uint16, value float32) error {
+	return d.SetUint32BE(dt, addr, math.Float32bits(value))
+}
+
+// SetFloat32LE is a convenience function which sets the registers specified by
+// dt and addr to the specified single-precision floating point value
+// in little endian order.
+func (d *Data) SetFloat32LE(dt DataType, addr uint16, value float32) error {
+	return d.SetUint32LE(dt, addr, math.Float32bits(value))
+}
+
+// SetFloat64BE is a convenience function which sets the registers specified by
+// dt and addr to the specified double-precision floating point value
+// in big endian order.
+func (d *Data) SetFloat64BE(dt DataType, addr uint16, value float64) error {
+	return d.SetUint64BE(dt, addr, math.Float64bits(value))
+}
+
+// SetFloat64LE is a convenience function which sets the registers specified by
+// dt and addr to the specified double-precision floating point value
+// in little endian order.
+func (d *Data) SetFloat64LE(dt DataType, addr uint16, value float64) error {
+	return d.SetUint64LE(dt, addr, math.Float64bits(value))
+}
+
+// SetStringBE sets the specified number of addresses to the specified string
+// in big-endian order. Excess characters are stripped, missing characters are
+// filled with zeroes.
+func (d *Data) SetStringBE(
+	dt DataType, addr uint16, len int, value string,
+) error {
+	numBytes := (len*numBits[dt] + 7) / 8
+	buf := make([]byte, numBytes)
+	copy(buf, value)
+	return d.writeData(dt, addr, len, buf)
+}
+
+// SetStringLE sets the specified number of addresses to the specified string
+// in little-endian order. Excess characters are stripped, missing characters
+// are filled with zeroes.
+func (d *Data) SetStringLE(
+	dt DataType, addr uint16, len int, value string,
+) error {
+	numBytes := (len*numBits[dt] + 7) / 8
+	buf := make([]byte, numBytes)
+	copy(buf, value)
+	for i := 0; i < numBytes; i += 2 {
+		buf[i], buf[i+1] = buf[i+1], buf[i]
+	}
+	return d.writeData(dt, addr, len, buf)
 }
